@@ -1,159 +1,149 @@
+import express from "express";
 import zod from "zod";
-import User from "../models/user.model.js";
-import bcrypt from "bcrypt";
+import { User, Account } from "../db.js";
 import jwt from "jsonwebtoken";
-import { JWT_SECRET } from "../constants/constants.js";
+import { JWT_SECRET } from "../config.js";
+import { authMiddleware } from "../middleware.js";
 
-// Validation Schemas
-const signupSchema = zod.object({
-  email: zod.string().email(),
-  firstname: zod.string().min(1, "First name is required"),
-  lastname: zod.string().min(1, "Last name is required"),
-  password: zod.string().min(6, "Password must be at least 6 characters"),
+const router = express.Router();
+
+const signupBody = zod.object({
+  username: zod.string().email(),
+  firstName: zod.string(),
+  lastName: zod.string(),
+  password: zod.string(),
 });
 
-const signinSchema = zod.object({
-  email: zod.string().email(),
-  password: zod.string().min(6, "Password must be at least 6 characters"),
+router.post("/signup", async (req, res) => {
+  const { success } = signupBody.safeParse(req.body);
+  if (!success) {
+    return res.status(411).json({
+      message: "Email already taken / Incorrect inputs",
+    });
+  }
+
+  const existingUser = await User.findOne({
+    username: req.body.username,
+  });
+
+  if (existingUser) {
+    return res.status(411).json({
+      message: "Email already taken/Incorrect inputs",
+    });
+  }
+
+  const user = await User.create({
+    username: req.body.username,
+    password: req.body.password,
+    firstName: req.body.firstName,
+    lastName: req.body.lastName,
+  });
+  const userId = user._id;
+
+  await Account.create({
+    userId,
+    balance: 1 + Math.random() * 10000,
+  });
+
+  const token = jwt.sign(
+    {
+      userId,
+    },
+    JWT_SECRET
+  );
+
+  res.json({
+    message: "User created successfully",
+    token: token,
+  });
 });
 
-const updateValueSchema = zod.object({
-  firstname: zod.string().min(1, "First name is required"),
-  lastname: zod.string().min(1, "Last name is required"),
-  password: zod.string().min(6, "Password must be at least 6 characters"),
+const signinBody = zod.object({
+  username: zod.string().email(),
+  password: zod.string(),
 });
 
-// Signup Function
-export const signup = async (req, res) => {
-  const parsed = signupSchema.safeParse(req.body);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      message: "Validation Format Error",
-      errors: parsed.error.format(),
+router.post("/signin", async (req, res) => {
+  const { success } = signinBody.safeParse(req.body);
+  if (!success) {
+    return res.status(411).json({
+      message: "Email already taken / Incorrect inputs",
     });
   }
 
-  const { email, firstname, lastname, password } = parsed.data;
+  const user = await User.findOne({
+    username: req.body.username,
+    password: req.body.password,
+  });
 
-  try {
-    // Check if user already exists
-    const isAlreadyUserExists = await User.findOne({ email });
-    if (isAlreadyUserExists) {
-      return res.status(400).json({
-        message: "User already exists",
-      });
-    }
+  if (user) {
+    const token = jwt.sign(
+      {
+        userId: user._id,
+      },
+      JWT_SECRET
+    );
 
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create and save new user
-    const newUser = await User.create({
-      email,
-      firstname,
-      lastname,
-      password: hashedPassword,
+    res.json({
+      token: token,
     });
-
-    return res.status(201).json({
-      success: true,
-      message: "User onboarded successfully",
-    });
-  } catch (error) {
-    console.error("Signup error:", error);
-    return res.status(500).json({
-      message: "Something went wrong. Please try again later.",
-    });
+    return;
   }
-};
 
-// Signin Function
-export const signin = async (req, res) => {
-  const parsed = signinSchema.safeParse(req.body);
+  res.status(411).json({
+    message: "Error while logging in",
+  });
+});
 
-  if (!parsed.success) {
-    return res.status(400).json({
-      message: "Validation Format Error",
-      errors: parsed.error.format(),
+const updateBody = zod.object({
+  password: zod.string().optional(),
+  firstName: zod.string().optional(),
+  lastName: zod.string().optional(),
+});
+
+router.put("/", authMiddleware, async (req, res) => {
+  const { success } = updateBody.safeParse(req.body);
+  if (!success) {
+    return res.status(411).json({
+      message: "Error while updating information",
     });
   }
 
-  const { email, password } = parsed.data;
+  await User.updateOne(req.body, {
+    id: req.userId,
+  });
 
-  try {
-    // Check if user exists
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({
-        message: "User has not registered yet",
-      });
-    }
+  res.json({
+    message: "Updated successfully",
+  });
+});
 
-    // Validate password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(400).json({
-        message: "Email or password is incorrect",
-      });
-    }
-    const token = jwt.sign({ email: user._id }, JWT_SECRET, {
-      expiresIn: "1d",
-    });
+router.get("/bulk", async (req, res) => {
+  const filter = req.query.filter || "";
 
-    // Successful signin
-    return res.status(200).json({
-      success: true,
-      message: "User signed in successfully",
-      token,
-    });
-  } catch (error) {
-    console.error("Signin error:", error);
-    return res.status(500).json({
-      message: "Something went wrong. Please try again later.",
-    });
-  }
-};
+  const users = await User.find({
+    $or: [
+      {
+        firstName: {
+          $regex: filter,
+        },
+      },
+      {
+        lastName: {
+          $regex: filter,
+        },
+      },
+    ],
+  });
 
-export const bulk = async (req, res) => {
-  try {
-    const response = await User.find({});
-    console.log(response);
-    const responseJson = response.map((item) => ({
-      id: item._id,
-      email: item.email,
-      firstname: item.firstname,
-      lastname: item.lastname,
-      createdAt: item.createdAt,
-    }));
-    return res.status(200).json(responseJson);
-  } catch (error) {
-    return res.status(400).json({
-      message: "Something went wrong",
-    });
-  }
-};
+  res.json({
+    user: users.map((user) => ({
+      username: user.username,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      _id: user._id,
+    })),
+  });
+});
 
-export const update = async (req, res) => {
-  const parsed = updateValueSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      message: "Validdation Format Error",
-      error: parsed.error.message(),
-    });
-  }
-  try {
-    const { email, firstname, lastname, password } = req.body;
-    const isAlreadyUserExists = await User.findOne({ email });
-    if (firstname) isAlreadyUserExists.firstname = firstname;
-    if (lastname) isAlreadyUserExists.lastname = lastname;
-    if (password)
-      isAlreadyUserExists.password = await bcrypt.hash(password, 10);
-    await isAlreadyUserExists.save();
-    return res.status(200).json({
-      message: "Value updated",
-    });
-  } catch (error) {
-    return res.status(400).json({ message: "Something went wrong" });
-  }
-};
+export default router;
